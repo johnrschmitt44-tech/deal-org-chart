@@ -1,0 +1,278 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Deal Org Chart</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      background: #f5f8fa;
+      min-height: 100vh;
+    }
+
+    #header {
+      padding: 16px 24px;
+      background: white;
+      border-bottom: 1px solid #e5eaf0;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+
+    #header h1 {
+      font-size: 15px;
+      font-weight: 600;
+      color: #33475b;
+    }
+
+    #header .badge {
+      font-size: 11px;
+      color: #516f90;
+      background: #eaf0f6;
+      padding: 2px 8px;
+      border-radius: 20px;
+    }
+
+    #chart {
+      width: 100%;
+      overflow: auto;
+      padding: 40px 40px 60px;
+      display: flex;
+      justify-content: center;
+    }
+
+    svg { overflow: visible; }
+
+    #error {
+      padding: 60px;
+      text-align: center;
+      color: #f2545b;
+      font-size: 14px;
+    }
+
+    #empty {
+      padding: 60px;
+      text-align: center;
+      color: #516f90;
+      font-size: 14px;
+    }
+  </style>
+</head>
+<body>
+  <div id="header">
+    <h1>Stakeholder Org Chart</h1>
+    <span class="badge" id="count"></span>
+  </div>
+  <div id="chart"></div>
+
+  <script>
+    // ─── Layout constants ───────────────────────────────────────────────────
+    const BOX_W   = 148;   // box width  (px)
+    const BOX_H   = 58;    // box height (px)
+    const H_GAP   = 36;    // horizontal gap between sibling boxes
+    const V_GAP   = 64;    // vertical gap between levels
+    const R       = 7;     // border radius
+
+    const MAX_NAME  = 17;  // chars before truncation
+    const MAX_TITLE = 19;
+
+    // ─── Helpers ────────────────────────────────────────────────────────────
+    function cap(str, n) {
+      if (!str) return '';
+      str = String(str).trim();
+      return str.length > n ? str.slice(0, n) + '\u2026' : str;
+    }
+
+    // ─── Layout: assign fractional column positions to every node ───────────
+    //   Leaves get 0, 1, 2, …
+    //   Parents get the midpoint of their children's positions.
+    function assignPositions(rootIds, childrenOf) {
+      const pos = {};
+      let leafIdx = 0;
+
+      function visit(id) {
+        const ch = childrenOf[id] || [];
+        if (ch.length === 0) {
+          pos[id] = leafIdx++;
+        } else {
+          ch.forEach(visit);
+          const xs = ch.map(c => pos[c]);
+          pos[id] = (Math.min(...xs) + Math.max(...xs)) / 2;
+        }
+      }
+
+      rootIds.forEach(visit);
+      return { pos, totalLeaves: leafIdx };
+    }
+
+    // BFS level grouping
+    function bfsLevels(rootIds, childrenOf) {
+      const levels = [];
+      let current = [...rootIds];
+      const seen = new Set();
+      while (current.length) {
+        levels.push(current);
+        current.forEach(id => seen.add(id));
+        const next = [];
+        current.forEach(id => (childrenOf[id] || []).forEach(c => {
+          if (!seen.has(c)) next.push(c);
+        }));
+        current = next;
+      }
+      return levels;
+    }
+
+    // ─── Render ─────────────────────────────────────────────────────────────
+    function render(data) {
+      const nodesById = {};
+      data.nodes.forEach(n => { nodesById[n.id] = n; });
+
+      // Build children map
+      const childrenOf = {};
+      data.nodes.forEach(n => {
+        if (n.parentId && nodesById[n.parentId]) {
+          (childrenOf[n.parentId] = childrenOf[n.parentId] || []).push(n.id);
+        }
+      });
+
+      const rootIds = data.nodes
+        .filter(n => !n.parentId || !nodesById[n.parentId])
+        .map(n => n.id);
+
+      if (rootIds.length === 0) {
+        document.getElementById('chart').innerHTML =
+          '<div id="empty">No contacts in this chart.</div>';
+        return;
+      }
+
+      const { pos, totalLeaves } = assignPositions(rootIds, childrenOf);
+      const levels = bfsLevels(rootIds, childrenOf);
+
+      // Pixel coords for the center of each box
+      const cx = {}, cy = {};
+      data.nodes.forEach(n => {
+        cx[n.id] = pos[n.id] * (BOX_W + H_GAP) + BOX_W / 2;
+      });
+      levels.forEach((ids, li) => {
+        ids.forEach(id => { cy[id] = li * (BOX_H + V_GAP) + BOX_H / 2; });
+      });
+
+      const svgW = Math.max(totalLeaves * (BOX_W + H_GAP) - H_GAP, BOX_W) + 2;
+      const svgH = levels.length * (BOX_H + V_GAP) - V_GAP + 2;
+
+      const NS = 'http://www.w3.org/2000/svg';
+
+      function el(tag, attrs, parent) {
+        const e = document.createElementNS(NS, tag);
+        Object.entries(attrs).forEach(([k, v]) => e.setAttribute(k, String(v)));
+        if (parent) parent.appendChild(e);
+        return e;
+      }
+
+      function txt(tag, attrs, text, parent) {
+        const e = el(tag, attrs, parent);
+        e.textContent = text;
+        return e;
+      }
+
+      const svg = el('svg', {
+        width: svgW,
+        height: svgH,
+        viewBox: `0 0 ${svgW} ${svgH}`,
+      });
+
+      // ── defs: drop shadow ──
+      const defs = el('defs', {}, svg);
+      const filter = el('filter', { id: 'shadow', x: '-20%', y: '-20%', width: '140%', height: '140%' }, defs);
+      el('feDropShadow', { dx: '0', dy: '1', stdDeviation: '2', 'flood-color': '#00000014' }, filter);
+
+      const g = el('g', { transform: 'translate(1, 1)' }, svg);
+
+      // ── connectors (drawn first, behind boxes) ──
+      data.nodes.forEach(n => {
+        if (!n.parentId || !nodesById[n.parentId]) return;
+
+        const px = cx[n.parentId], py = cy[n.parentId];
+        const nx = cx[n.id],       ny = cy[n.id];
+        const midY = py + BOX_H / 2 + V_GAP / 2;
+
+        // Elbow path: parent bottom → midY → child top
+        el('path', {
+          d: `M ${px} ${py + BOX_H / 2} V ${midY} H ${nx} V ${ny - BOX_H / 2}`,
+          fill: 'none',
+          stroke: '#c8d6e1',
+          'stroke-width': '1.5',
+          'stroke-linejoin': 'round',
+        }, g);
+      });
+
+      // ── boxes ──
+      data.nodes.forEach(n => {
+        const x = cx[n.id] - BOX_W / 2;
+        const y = cy[n.id] - BOX_H / 2;
+        const hasTitle = Boolean(n.title);
+
+        // Card background
+        el('rect', {
+          x, y,
+          width: BOX_W,
+          height: BOX_H,
+          rx: R,
+          fill: 'white',
+          stroke: '#d1dde8',
+          'stroke-width': '1',
+          filter: 'url(#shadow)',
+        }, g);
+
+        // Name
+        txt('text', {
+          x: cx[n.id],
+          y: y + (hasTitle ? 23 : 31),
+          'text-anchor': 'middle',
+          'dominant-baseline': 'auto',
+          'font-family': "-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif",
+          'font-size': '13',
+          'font-weight': '600',
+          fill: '#33475b',
+        }, cap(n.name, MAX_NAME), g);
+
+        // Job title
+        if (hasTitle) {
+          txt('text', {
+            x: cx[n.id],
+            y: y + 39,
+            'text-anchor': 'middle',
+            'dominant-baseline': 'auto',
+            'font-family': "-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif",
+            'font-size': '10.5',
+            'font-weight': '400',
+            fill: '#7c98b6',
+          }, cap(n.title, MAX_TITLE), g);
+        }
+      });
+
+      document.getElementById('chart').appendChild(svg);
+      document.getElementById('count').textContent = `${data.nodes.length} contact${data.nodes.length !== 1 ? 's' : ''}`;
+    }
+
+    // ─── Bootstrap ──────────────────────────────────────────────────────────
+    try {
+      const params = new URLSearchParams(window.location.search);
+      const raw = params.get('data');
+      if (!raw) {
+        document.getElementById('chart').innerHTML =
+          '<div id="error">No chart data found in URL.<br/>Open this page from the HubSpot deal card.</div>';
+      } else {
+        const data = JSON.parse(decodeURIComponent(raw));
+        render(data);
+      }
+    } catch (e) {
+      document.getElementById('chart').innerHTML =
+        `<div id="error">Could not render chart: ${e.message}</div>`;
+    }
+  </script>
+</body>
+</html>
